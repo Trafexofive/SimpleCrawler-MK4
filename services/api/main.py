@@ -416,13 +416,14 @@ async def start_crawl(request: CrawlRequest):
         job_id=job_id,
         status="pending",
         created_at=datetime.now(timezone.utc),
-        request_data=request.dict(mode='json')  # Serialize HttpUrl properly
+        request_data={**request.dict(), 'start_url': str(request.start_url)}  # Convert HttpUrl to string
     )
     
-        await db.create_job(job)
+    await db.create_job(job)
     
-    # Queue job for processing
-    await redis_client.queue_job(job_id, request.dict())
+    # Queue job for processing  
+    request_dict = {**request.dict(), 'start_url': str(request.start_url)}
+    await redis_client.queue_job(job_id, request_dict)
     
     # Estimate completion time
     estimated_time = request.max_pages * request.delay + 30

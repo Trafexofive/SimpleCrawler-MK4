@@ -1,0 +1,194 @@
+version: '3.8'
+
+# Development environment with hot-reload, debugging, and development tools
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: crawler_db_dev
+      POSTGRES_USER: crawler
+      POSTGRES_PASSWORD: dev_password
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    command: postgres -c log_statement=all -c log_destination=stderr
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crawler -d crawler_db_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache/Queue
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --loglevel debug
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # API Service (Development)
+  api:
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8000:8000"
+      - "5678:5678"  # Debugger port
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://crawler:dev_password@postgres:5432/crawler_db_dev
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=debug
+      - RELOAD=true
+    volumes:
+      - ../app:/app/crawler:rw  # Read-write for development
+      - ../services/api:/app/api:rw
+      - crawler_dev_output:/app/output
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "--wait-for-client", "main.py"]
+
+  # Background Workers (Development)
+  worker:
+    build:
+      context: ../services/worker
+      dockerfile: Dockerfile.dev
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://crawler:dev_password@postgres:5432/crawler_db_dev
+      - LOG_LEVEL=debug
+    volumes:
+      - ../app:/app/crawler:rw
+      - ../services/worker:/app/worker:rw
+      - crawler_dev_output:/app/output
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1  # Single worker for development
+
+  # Nginx (Development)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.dev.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ./logs:/var/log/nginx
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Development Tools
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      - postgres
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    ports:
+      - "8081:8081"
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    depends_on:
+      - redis
+
+  # Log aggregation (ELK-lite)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_dev_data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+  # Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.dev.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_dev_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: dev_admin
+    volumes:
+      - grafana_dev_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+
+  # Testing services
+  wiremock:
+    image: wiremock/wiremock:latest
+    ports:
+      - "8082:8080"
+    volumes:
+      - ../testing/mocks:/home/wiremock
+    command: ["--global-response-templating", "--verbose"]
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+  crawler_dev_output:
+  elasticsearch_dev_data:
+  prometheus_dev_data:
+  grafana_dev_data:
+
+networks:
+  default:
+    name: simplecrawler_dev_network
